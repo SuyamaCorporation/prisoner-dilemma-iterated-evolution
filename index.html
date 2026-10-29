@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>繰り返し囚人のジレンマ 進化シミュレーション</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col">
+<header class="bg-gray-800 px-4 py-3 shadow">
+  <h1 class="text-xl font-bold text-purple-400">繰り返し囚人のジレンマ 進化シミュレーション</h1>
+</header>
+<main class="flex flex-1 gap-4 p-4 overflow-hidden" style="height:calc(100vh - 56px)">
+  <!-- 左パネル -->
+  <aside class="w-72 flex flex-col gap-3 overflow-y-auto" aria-label="シミュレーション設定">
+    <section class="bg-gray-800 rounded-lg p-3">
+      <h2 class="text-sm font-semibold text-purple-300 mb-2">設定</h2>
+      <label class="text-xs text-gray-300">世代数: <span id="gen-val" class="font-mono text-purple-300">100</span></label>
+      <input type="range" id="num-gens" min="10" max="500" value="100" step="10"
+        class="w-full accent-purple-400" aria-label="世代数">
+
+      <label class="text-xs text-gray-300 block mt-2">ラウンド回数: <span id="rnd-val" class="font-mono text-purple-300">20</span></label>
+      <input type="range" id="num-rounds" min="5" max="100" value="20" step="5"
+        class="w-full accent-purple-400" aria-label="ラウンド回数">
+
+      <label class="text-xs text-gray-300 block mt-2">初期個体数/戦略: <span id="pop-val" class="font-mono text-purple-300">20</span></label>
+      <input type="range" id="pop-size" min="5" max="50" value="20" step="5"
+        class="w-full accent-purple-400" aria-label="初期個体数">
+    </section>
+
+    <section class="bg-gray-800 rounded-lg p-3">
+      <h2 class="text-sm font-semibold text-purple-300 mb-2">利得行列</h2>
+      <div class="text-xs text-gray-400">
+        <div class="grid grid-cols-2 gap-1">
+          <div>CC (協調-協調): <span class="text-green-400 font-mono">3,3</span></div>
+          <div>CD (協調-裏切り): <span class="text-red-400 font-mono">0,5</span></div>
+          <div>DC (裏切り-協調): <span class="text-yellow-400 font-mono">5,0</span></div>
+          <div>DD (裏切り-裏切り): <span class="text-gray-400 font-mono">1,1</span></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="flex gap-2">
+      <button id="run-btn"
+        class="flex-1 text-sm bg-purple-700 hover:bg-purple-600 rounded px-3 py-2 transition font-semibold"
+        aria-label="シミュレーション実行">▶ 実行</button>
+      <button id="save-btn"
+        class="flex-1 text-xs bg-green-700 hover:bg-green-600 rounded px-3 py-2 transition"
+        aria-label="結果を保存">保存</button>
+    </div>
+
+    <section id="result-panel" class="bg-gray-800 rounded-lg p-3 hidden" aria-live="polite">
+      <h2 class="text-sm font-semibold text-purple-300 mb-2">最終世代比率</h2>
+      <div id="final-ratios" class="text-xs space-y-1"></div>
+    </section>
+
+    <section class="bg-gray-800 rounded-lg p-3">
+      <h2 class="text-sm font-semibold text-purple-300 mb-1">戦略説明</h2>
+      <div class="text-xs text-gray-400 space-y-1">
+        <div><span class="text-blue-400">■ AllC</span> 常に協調</div>
+        <div><span class="text-red-400">■ AllD</span> 常に裏切り</div>
+        <div><span class="text-green-400">■ TFT</span> 相手の前手をコピー</div>
+        <div><span class="text-yellow-400">■ RAND</span> ランダム(50%)</div>
+        <div><span class="text-orange-400">■ GTFT</span> 寛容TFT(裏切り10%許容)</div>
+        <div><span class="text-pink-400">■ GRIM</span> 一度裏切られたら永遠に裏切る</div>
+      </div>
+    </section>
+  </aside>
+
+  <!-- Canvas -->
+  <div class="flex-1 flex flex-col gap-2">
+    <div class="flex-1 bg-gray-950 rounded-lg overflow-hidden relative" id="canvas-wrap">
+      <canvas id="chart-canvas" class="w-full h-full" role="img" aria-label="戦略比率推移グラフ"></canvas>
+    </div>
+    <div class="bg-gray-800 rounded-lg px-3 py-2 text-xs text-gray-400" id="gen-info" aria-live="polite">
+      実行すると世代ごとの戦略比率推移を表示します
+    </div>
+  </div>
+</main>
+
+<script>
+(function() {
+  'use strict';
+
+  const STORAGE_KEY = 'prisonerDilemmaState_v1';
+
+  // Payoff matrix
+  const R = 3, T = 5, S = 0, P = 1; // Reward, Temptation, Sucker, Punishment
+
+  const STRATEGIES = [
+    { name: 'AllC',  color: '#60a5fa', fn: (myHist, oppHist) => 'C' },
+    { name: 'AllD',  color: '#f87171', fn: (myHist, oppHist) => 'D' },
+    { name: 'TFT',   color: '#4ade80', fn: (myHist, oppHist) => oppHist.length ? oppHist[oppHist.length-1] : 'C' },
+    { name: 'RAND',  color: '#facc15', fn: (myHist, oppHist) => Math.random() < 0.5 ? 'C' : 'D' },
+    { name: 'GTFT',  color: '#fb923c', fn: (myHist, oppHist) => {
+      if (!oppHist.length) return 'C';
+      const last = oppHist[oppHist.length-1];
+      if (last === 'C') return 'C';
+      return Math.random() < 0.1 ? 'C' : 'D'; // forgive 10%
+    }},
+    { name: 'GRIM',  color: '#f472b6', fn: (myHist, oppHist) => {
+      if (oppHist.includes('D')) return 'D';
+      return 'C';
+    }},
+  ];
+
+  let historyData = []; // [{ratios: [r0..r5]}]
+
+  function playRound(stratA, stratB, rounds) {
+    const histA = [], histB = [];
+    let scoreA = 0, scoreB = 0;
+    for (let i = 0; i < rounds; i++) {
+      const moveA = stratA.fn([...histA], [...histB]);
+      const moveB = stratB.fn([...histB], [...histA]);
+      histA.push(moveA); histB.push(moveB);
+      if (moveA === 'C' && moveB === 'C') { scoreA += R; scoreB += R; }
+      else if (moveA === 'C' && moveB === 'D') { scoreA += S; scoreB += T; }
+      else if (moveA === 'D' && moveB === 'C') { scoreA += T; scoreB += S; }
+      else { scoreA += P; scoreB += P; }
+    }
+    return [scoreA, scoreB];
+  }
+
+  function simulate() {
+    const numGens = parseInt(document.getElementById('num-gens').value);
+    const numRounds = parseInt(document.getElementById('num-rounds').value);
+    const popPerStrat = parseInt(document.getElementById('pop-size').value);
+
+    // populations[i] = count of strategy i
+    let pops = STRATEGIES.map(() => popPerStrat);
+    historyData = [];
+
+    const totalPop = () => pops.reduce((a, b) => a + b, 0);
+
+    for (let g = 0; g < numGens; g++) {
+      const total = totalPop();
+      if (total === 0) break;
+      const ratios = pops.map(p => p / total);
+      historyData.push({ ratios: [...ratios] });
+
+      // Round-robin: each strategy pair plays
+      const scores = STRATEGIES.map(() => 0);
+      for (let i = 0; i < STRATEGIES.length; i++) {
+        for (let j = 0; j < STRATEGIES.length; j++) {
+          if (i === j) {
+            // Self-play: pops[i]*(pops[i]-1)/2 matchups
+            const n = pops[i];
+            if (n < 2) continue;
+            const [s1] = playRound(STRATEGIES[i], STRATEGIES[i], numRounds);
+            scores[i] += s1 * n;
+          } else {
+            // Cross-play: pops[i]*pops[j] matchups
+            const n = pops[i] * pops[j];
+            if (n === 0) continue;
+            const [si] = playRound(STRATEGIES[i], STRATEGIES[j], numRounds);
+            scores[i] += si * pops[j];
+          }
+        }
+      }
+
+      // Proportional selection: next gen pop proportional to scores
+      const totalScore = scores.reduce((a, b) => a + b, 0);
+      if (totalScore <= 0) break;
+      const newTotal = popPerStrat * STRATEGIES.length;
+      pops = scores.map(s => Math.max(0, Math.round(s / totalScore * newTotal)));
+    }
+
+    // Push final
+    const total = totalPop();
+    historyData.push({ ratios: pops.map(p => total > 0 ? p / total : 0) });
+
+    return pops;
+  }
+
+  function renderChart() {
+    const canvas = document.getElementById('chart-canvas');
+    const wrap = document.getElementById('canvas-wrap');
+    canvas.width = wrap.clientWidth;
+    canvas.height = wrap.clientHeight;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+
+    ctx.fillStyle = '#05050f';
+    ctx.fillRect(0, 0, W, H);
+
+    if (!historyData.length) return;
+
+    const pad = { l: 50, r: 20, t: 20, b: 40 };
+    const cW = W - pad.l - pad.r;
+    const cH = H - pad.t - pad.b;
+
+    // Grid
+    ctx.strokeStyle = '#1e2a3a';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 4]);
+    for (let y = 0; y <= 1; y += 0.2) {
+      const cy = pad.t + cH * (1 - y);
+      ctx.beginPath(); ctx.moveTo(pad.l, cy); ctx.lineTo(pad.l + cW, cy); ctx.stroke();
+      ctx.fillStyle = '#4a6070';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText((y * 100).toFixed(0) + '%', pad.l - 4, cy + 3);
+    }
+    ctx.setLineDash([]);
+
+    // Axes
+    ctx.strokeStyle = '#607d8b';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, pad.t + cH); ctx.lineTo(pad.l + cW, pad.t + cH); ctx.stroke();
+
+    // X labels
+    ctx.fillStyle = '#4a6070';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    const genStep = Math.max(1, Math.floor(historyData.length / 8));
+    for (let g = 0; g < historyData.length; g += genStep) {
+      const cx = pad.l + (g / (historyData.length - 1)) * cW;
+      ctx.fillText(g, cx, pad.t + cH + 14);
+    }
+    ctx.fillStyle = '#8899aa';
+    ctx.fillText('世代', pad.l + cW / 2, H - 4);
+
+    // Lines per strategy
+    STRATEGIES.forEach((s, si) => {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      historyData.forEach((row, gi) => {
+        const cx = pad.l + (gi / (historyData.length - 1)) * cW;
+        const cy = pad.t + cH * (1 - row.ratios[si]);
+        if (gi === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
+      });
+      ctx.stroke();
+    });
+
+    // Legend
+    const lx = pad.l + cW - 80, ly = pad.t + 8;
+    ctx.fillStyle = 'rgba(10,10,20,0.75)';
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(lx - 4, ly - 4, 84, STRATEGIES.length * 16 + 8, 4);
+    ctx.fill(); ctx.stroke();
+
+    STRATEGIES.forEach((s, si) => {
+      ctx.fillStyle = s.color;
+      ctx.fillRect(lx, ly + si * 16 + 2, 12, 4);
+      ctx.fillStyle = '#e0e0e0';
+      ctx.font = '10px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(s.name, lx + 16, ly + si * 16 + 8);
+    });
+  }
+
+  function showFinalRatios(finalPops) {
+    const panel = document.getElementById('result-panel');
+    const ratiosDiv = document.getElementById('final-ratios');
+    panel.classList.remove('hidden');
+    while (ratiosDiv.firstChild) ratiosDiv.removeChild(ratiosDiv.firstChild);
+
+    const total = finalPops.reduce((a, b) => a + b, 0);
+    const sorted = STRATEGIES.map((s, i) => ({ s, pop: finalPops[i] }))
+      .sort((a, b) => b.pop - a.pop);
+
+    sorted.forEach(({ s, pop }) => {
+      const pct = total > 0 ? (pop / total * 100).toFixed(1) : '0.0';
+      const row = document.createElement('div');
+      row.className = 'flex items-center gap-2';
+
+      const dot = document.createElement('span');
+      dot.style.color = s.color;
+      dot.textContent = '■';
+
+      const name = document.createElement('span');
+      name.textContent = s.name;
+      name.className = 'w-10 font-mono';
+
+      const bar = document.createElement('div');
+      bar.className = 'flex-1 bg-gray-700 rounded h-3 overflow-hidden';
+      const fill = document.createElement('div');
+      fill.className = 'h-full rounded';
+      fill.style.width = pct + '%';
+      fill.style.backgroundColor = s.color;
+      bar.appendChild(fill);
+
+      const pctSpan = document.createElement('span');
+      pctSpan.className = 'font-mono text-right w-12';
+      pctSpan.textContent = pct + '%';
+
+      row.appendChild(dot);
+      row.appendChild(name);
+      row.appendChild(bar);
+      row.appendChild(pctSpan);
+      ratiosDiv.appendChild(row);
+    });
+  }
+
+  /* ---------- Sliders ---------- */
+  document.getElementById('num-gens').addEventListener('input', e => {
+    document.getElementById('gen-val').textContent = e.target.value;
+  });
+  document.getElementById('num-rounds').addEventListener('input', e => {
+    document.getElementById('rnd-val').textContent = e.target.value;
+  });
+  document.getElementById('pop-size').addEventListener('input', e => {
+    document.getElementById('pop-val').textContent = e.target.value;
+  });
+
+  /* ---------- Run ---------- */
+  document.getElementById('run-btn').addEventListener('click', () => {
+    const btn = document.getElementById('run-btn');
+    btn.textContent = '計算中...';
+    btn.disabled = true;
+    setTimeout(() => {
+      const finalPops = simulate();
+      renderChart();
+      showFinalRatios(finalPops);
+      const lastGen = historyData.length;
+      document.getElementById('gen-info').textContent = `完了: ${lastGen} 世代シミュレーション済み`;
+      btn.textContent = '▶ 実行';
+      btn.disabled = false;
+    }, 10);
+  });
+
+  document.getElementById('save-btn').addEventListener('click', () => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        numGens: document.getElementById('num-gens').value,
+        numRounds: document.getElementById('num-rounds').value,
+        popSize: document.getElementById('pop-size').value,
+        savedAt: new Date().toISOString(),
+      }));
+      const btn = document.getElementById('save-btn');
+      btn.textContent = '保存済み✓';
+      setTimeout(() => { btn.textContent = '保存'; }, 1500);
+    } catch(e) {}
+  });
+
+  /* ---------- Load saved settings ---------- */
+  function loadSettings() {
+    try {
+      const d = localStorage.getItem(STORAGE_KEY);
+      if (!d) return;
+      const s = JSON.parse(d);
+      if (s.numGens) { document.getElementById('num-gens').value = s.numGens; document.getElementById('gen-val').textContent = s.numGens; }
+      if (s.numRounds) { document.getElementById('num-rounds').value = s.numRounds; document.getElementById('rnd-val').textContent = s.numRounds; }
+      if (s.popSize) { document.getElementById('pop-size').value = s.popSize; document.getElementById('pop-val').textContent = s.popSize; }
+    } catch(e) {}
+  }
+
+  /* ---------- Resize ---------- */
+  const ro = new ResizeObserver(() => { if (historyData.length) renderChart(); });
+  ro.observe(document.getElementById('canvas-wrap'));
+
+  loadSettings();
+})();
+</script>
+</body>
+</html>
